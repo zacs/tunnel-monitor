@@ -22,3 +22,37 @@ bash -c "$(curl -fsSL https://raw.githubusercontent.com/zacs/tunnel-monitor/main
 ```
 
 The `HOST_TAG` is just to name the entities in Home Assistant and doesn't actually impact the functionality. 
+
+## Dashboard
+
+I generally use the HA sensors in my own automations, but if you like pretty dashboards:
+
+```
+type: vertical-stack
+cards:
+  - type: entities
+    title: Mac mini • Updates
+    entities:
+      - entity: update.macmini_seattle_tailscale
+        name: Tailscale
+      - entity: update.macmini_seattle_strongswan
+        name: strongSwan
+  - type: entities
+    title: Site Magic (Seattle → Tokyo)
+    entities:
+      - entity: sensor.macmini_seattle_site_magic_tokyo_udm_availability
+        name: Availability
+      - entity: sensor.macmini_seattle_site_magic_tokyo_udm_latency_ms
+        name: Latency (ms)
+  - type: conditional
+    conditions:
+      - entity: sensor.macmini_seattle_site_magic_tokyo_udm_availability
+        state_not: up
+    card:
+      type: markdown
+      content: |
+        ❌ **Site Magic path appears DOWN** (Seattle → Tokyo).
+        Check UDM/UXG tunnels, WANs, and routing.
+```
+
+> Make sure to change the titles and entity names. I'm using a Mac Mini to tunnel from Tokyo to Seattle, hence the example. 
