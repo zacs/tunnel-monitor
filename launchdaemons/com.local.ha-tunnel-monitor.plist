@@ -1,0 +1,15 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+  <dict>
+    <Label>com.local.ha-tunnel-monitor</Label>
+    <ProgramArguments>
+      <string>/usr/local/sbin/ha_tunnel_monitor.sh</string>
+    </ProgramArguments>
+    <StartInterval>300</StartInterval>
+    <RunAtLoad>true</RunAtLoad>
+    <KeepAlive>false</KeepAlive>
+    <StandardOutPath>/var/log/ha_tunnel_monitor.out</StandardOutPath>
+    <StandardErrorPath>/var/log/ha_tunnel_monitor.err</StandardErrorPath>
+  </dict>
+</plist>

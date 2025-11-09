@@ -1,0 +1,20 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+  <dict>
+    <Label>com.local.ha-brew-update-db</Label>
+    <ProgramArguments>
+      <string>/usr/local/sbin/ha_brew_update_db.sh</string>
+    </ProgramArguments>
+    <StartCalendarInterval>
+      <dict>
+        <Hour>3</Hour>
+        <Minute>15</Minute>
+      </dict>
+    </StartCalendarInterval>
+    <RunAtLoad>false</RunAtLoad>
+    <KeepAlive>false</KeepAlive>
+    <StandardOutPath>/var/log/ha_brew_update_db.out</StandardOutPath>
+    <StandardErrorPath>/var/log/ha_brew_update_db.err</StandardErrorPath>
+  </dict>
+</plist>
