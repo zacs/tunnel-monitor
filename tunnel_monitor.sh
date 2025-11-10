@@ -193,34 +193,17 @@ check_strongswan_updates() {
 
 # Additional useful monitoring
 check_network_performance() {
-    log "Checking network performance..."
+    log "Checking Tailscale exit node status..."
     
     # Check internet connectivity through Tailscale exit node
     if tailscale status --json 2>/dev/null | jq -r '.ExitNodeStatus.Online' 2>/dev/null | grep -q true; then
         send_to_ha "binary_sensor.${HOST_TAG}_tailscale_exit_node" "on" \
             "{\"friendly_name\": \"Tailscale Exit Node\", \"device_class\": \"connectivity\"}"
+        log "Tailscale Exit Node: Active"
     else
         send_to_ha "binary_sensor.${HOST_TAG}_tailscale_exit_node" "off" \
             "{\"friendly_name\": \"Tailscale Exit Node\", \"device_class\": \"connectivity\"}"
-    fi
-    
-    # Check system resources
-    local cpu_usage=$(top -l 1 | grep "CPU usage" | awk '{print $3}' | sed 's/%//')
-    local memory_usage=$(vm_stat | grep "Pages active" | awk '{print $3}' | sed 's/\.//')
-    
-    send_to_ha "sensor.${HOST_TAG}_cpu_usage" "$cpu_usage" \
-        "{\"friendly_name\": \"CPU Usage\", \"unit_of_measurement\": \"%\"}"
-    
-    # Network interface stats for 10GB NIC
-    local interface=$(route get default | grep interface | awk '{print $2}')
-    if [[ -n "$interface" ]]; then
-        local rx_bytes=$(netstat -ibn | grep "$interface" | awk '{sum+=$7} END {print sum/1024/1024}')
-        local tx_bytes=$(netstat -ibn | grep "$interface" | awk '{sum+=$10} END {print sum/1024/1024}')
-        
-        send_to_ha "sensor.${HOST_TAG}_network_rx_mb" "${rx_bytes:-0}" \
-            "{\"friendly_name\": \"Network RX\", \"unit_of_measurement\": \"MB\"}"
-        send_to_ha "sensor.${HOST_TAG}_network_tx_mb" "${tx_bytes:-0}" \
-            "{\"friendly_name\": \"Network TX\", \"unit_of_measurement\": \"MB\"}"
+        log "Tailscale Exit Node: Inactive"
     fi
 }
 

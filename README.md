@@ -25,9 +25,6 @@ This monitoring system runs on a Mac Mini i7 with 10GB NIC (`seattle-tunnel`) an
 - `binary_sensor.{HOST_TAG}_tailscale_exit_node`
 - `sensor.{HOST_TAG}_site_magic_tokyo_udm_latency_ms`
 - `sensor.{HOST_TAG}_strongswan_connected_clients`
-- `sensor.{HOST_TAG}_cpu_usage`
-- `sensor.{HOST_TAG}_network_rx_mb`
-- `sensor.{HOST_TAG}_network_tx_mb`
 - `update.{HOST_TAG}_tailscale`
 - `update.{HOST_TAG}_strongswan`
 
@@ -35,10 +32,13 @@ This monitoring system runs on a Mac Mini i7 with 10GB NIC (`seattle-tunnel`) an
 
 Before installation, ensure you have:
 - macOS system with admin privileges
-- [Tailscale](https://tailscale.com/download/mac) installed and configured
+- [Homebrew](https://brew.sh) package manager
+- [Tailscale](https://formulae.brew.sh/cask/tailscale) installed via Homebrew (`brew install --cask tailscale`)
 - [StrongSwan](https://formulae.brew.sh/formula/strongswan) installed (`brew install strongswan`)
 - [jq](https://formulae.brew.sh/formula/jq) for JSON parsing (`brew install jq`)
 - Home Assistant with a [Long-lived Access Token](https://developers.home-assistant.io/docs/auth_api/#long-lived-access-token)
+
+> **Note**: Installing Tailscale via Homebrew enables automatic update detection. If you've installed Tailscale via the official installer, update monitoring will be limited.
 
 ## Install
 
@@ -114,15 +114,6 @@ cards:
         name: Availability
       - entity: sensor.seattle_tunnel_site_magic_tokyo_udm_latency_ms
         name: Latency (ms)
-  - type: entities
-    title: System Performance
-    entities:
-      - entity: sensor.seattle_tunnel_cpu_usage
-        name: CPU Usage
-      - entity: sensor.seattle_tunnel_network_rx_mb
-        name: Network RX (MB)
-      - entity: sensor.seattle_tunnel_network_tx_mb
-        name: Network TX (MB)
   - type: conditional
     conditions:
       - entity: binary_sensor.seattle_tunnel_site_magic_tokyo_udm_availability
