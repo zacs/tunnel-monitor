@@ -1,138 +1,177 @@
-#!/usr/bin/env bash
-set -euo pipefail
+#!/bin/bash
 
-# --------------------- configurable via env ---------------------
-REPO_URL="${REPO_URL:-}"          # e.g. https://github.com/you/ha-tunnel-monitor.git
-HOST_TAG="${HOST_TAG:-macmini-seattle}"
-HA_URL="${HA_URL:-}"              # e.g. https://homeassistant.example.com:8123
-HA_TOKEN="${HA_TOKEN:-}"          # long-lived HA token
-CODE_DIR="${CODE_DIR:-$HOME/Code}"   # where to clone/update the repo
-BREW_BIN_PATHS="/opt/homebrew/bin:/usr/local/bin"
+# install_tunnel_monitor.sh - Install tunnel monitoring system
+set -e
 
-# Tunnel monitor defaults (edit later in /etc/sitemagic_env if needed)
-TARGET_NAME_DEFAULT="tokyo-udm"
-TARGET_IP_DEFAULT="192.168.81.1"
-# Optional tailscale peer for latency:
-TS_PING_TARGET_DEFAULT=""
-TS_PING_COUNT_DEFAULT="3"
-TS_SKIP_NETCHECK_DEFAULT="false"
-# ----------------------------------------------------------------
+# Default values
+REPO_URL="${REPO_URL:-https://github.com/zacs/tunnel-monitor.git}"
+INSTALL_DIR="/usr/local/tunnel-monitor"
+SERVICE_NAME="com.tunnel-monitor.monitor"
 
-usage() {
-  cat <<EOF
-Usage (env vars):
+# Colors for output
+RED='\033[0;31m'
+GREEN='\033[0;32m'
+YELLOW='\033[1;33m'
+NC='\033[0m' # No Color
 
-  REPO_URL=<git url> HA_URL=<url> HA_TOKEN=<token> [HOST_TAG=<name>] [CODE_DIR=~/Code] $0
-
-Example:
-  REPO_URL=https://github.com/you/ha-tunnel-monitor.git \\
-  HA_URL=https://homeassistant.example.com:8123 \\
-  HA_TOKEN=eyJ0eXAiOiJK... \\
-  HOST_TAG=macmini-seattle \\
-  $0
-EOF
+log() {
+    echo -e "${GREEN}[INFO]${NC} $1"
 }
 
-require() { command -v "$1" >/dev/null 2>&1 || { echo "Missing '$1'"; exit 1; } }
+warn() {
+    echo -e "${YELLOW}[WARN]${NC} $1"
+}
 
-[[ -z "${REPO_URL}" || -z "${HA_URL}" || -z "${HA_TOKEN}" ]] && { usage; exit 1; }
-require git
-require curl
-export PATH="$BREW_BIN_PATHS:$PATH"
+error() {
+    echo -e "${RED}[ERROR]${NC} $1"
+    exit 1
+}
 
-# --- clone or update repo locally ---
-mkdir -p "$CODE_DIR"
-cd "$CODE_DIR"
-REPO_NAME="$(basename -s .git "$REPO_URL")"
-if [[ -d "$REPO_NAME/.git" ]]; then
-  echo "Updating existing repo $REPO_NAME ..."
-  git -C "$REPO_NAME" pull --ff-only
-else
-  echo "Cloning $REPO_URL into $CODE_DIR ..."
-  git clone "$REPO_URL"
+# Check if running as root
+if [[ $EUID -eq 0 ]]; then
+    error "This script should not be run as root"
 fi
-REPO_DIR="$CODE_DIR/$REPO_NAME"
 
-# --- files expected in repo ---
-REST_UPDATE_SCRIPT_REL="scripts/ha_update_rest.sh"
-REST_UPDATE_LAUNCHD_REL="launchdaemons/com.local.ha-update-rest.plist"
-UPDATE_SCRIPT_REL="scripts/ha_brew_update_db.sh"
-UPDATE_LAUNCHD_REL="launchdaemons/com.local.ha-brew-update-db.plist"
-TUN_MONITOR_REL="scripts/ha_tunnel_monitor.sh"
-TUN_LAUNCHD_REL="launchdaemons/com.local.ha-tunnel-monitor.plist"
+# Check required parameters
+if [[ -z "$HA_URL" || -z "$HA_TOKEN" || -z "$HOST_TAG" ]]; then
+    error "Missing required environment variables. Usage:
+    bash -c \"\$(curl -fsSL https://raw.githubusercontent.com/zacs/tunnel-monitor/main/install_tunnel_monitor.sh)\" -- \\
+      REPO_URL=https://github.com/zacs/tunnel-monitor.git \\
+      HA_URL=https://homeassistant.example.com:8123 \\
+      HA_TOKEN=YOUR_LONG_LIVED_TOKEN \\
+      HOST_TAG=seattle_tunnel \\
+      TOKYO_UDM_IP=192.168.1.1"
+fi
 
-for f in "$REST_UPDATE_SCRIPT_REL" "$REST_UPDATE_LAUNCHD_REL" \
-         "$UPDATE_SCRIPT_REL" "$UPDATE_LAUNCHD_REL" \
-         "$TUN_MONITOR_REL" "$TUN_LAUNCHD_REL"; do
-  [[ -f "$REPO_DIR/$f" ]] || { echo "Missing $f in repo"; exit 1; }
-done
+log "Installing Tunnel Monitor..."
+log "Target directory: $INSTALL_DIR"
+log "Home Assistant URL: $HA_URL"
+log "Host tag: $HOST_TAG"
 
-# --- write HA env (root-only) ---
-echo "Writing /etc/ha_env ..."
-sudo bash -c "cat > /etc/ha_env" <<EOF
+# Check dependencies
+log "Checking dependencies..."
+command -v git >/dev/null 2>&1 || error "Git is required but not installed"
+command -v curl >/dev/null 2>&1 || error "Curl is required but not installed"
+command -v jq >/dev/null 2>&1 || {
+    warn "jq not found, attempting to install via Homebrew..."
+    if command -v brew >/dev/null 2>&1; then
+        brew install jq
+    else
+        error "jq is required but not installed. Please install jq first: brew install jq"
+    fi
+}
+
+# Check if Tailscale is installed
+command -v tailscale >/dev/null 2>&1 || warn "Tailscale not found. Install from: https://tailscale.com/download/mac"
+
+# Check if StrongSwan is installed
+if ! pgrep -f charon >/dev/null 2>&1 && ! command -v swanctl >/dev/null 2>&1; then
+    warn "StrongSwan not found. Install via: brew install strongswan"
+fi
+
+# Create installation directory
+log "Creating installation directory..."
+sudo mkdir -p "$INSTALL_DIR"
+sudo chown "$(whoami):$(id -gn)" "$INSTALL_DIR"
+
+# Clone or update repository
+if [[ -d "$INSTALL_DIR/.git" ]]; then
+    log "Updating existing installation..."
+    cd "$INSTALL_DIR"
+    git pull origin main
+else
+    log "Cloning repository..."
+    git clone "$REPO_URL" "$INSTALL_DIR"
+    cd "$INSTALL_DIR"
+fi
+
+# Create configuration file
+log "Creating configuration file..."
+cat > "$INSTALL_DIR/config.env" <<EOF
+# Tunnel Monitor Configuration
 HA_URL="$HA_URL"
 HA_TOKEN="$HA_TOKEN"
 HOST_TAG="$HOST_TAG"
+TOKYO_UDM_IP="${TOKYO_UDM_IP:-192.168.1.1}"
 EOF
-sudo chmod 600 /etc/ha_env
 
-# --- tunnel monitor env (Site Magic target + Tailscale knobs) ---
-SM_ENV="/etc/sitemagic_env"
-if [[ ! -f "$SM_ENV" ]]; then
-  echo "Writing default $SM_ENV ..."
-  sudo bash -c "cat > $SM_ENV" <<EOF
-TARGET_NAME="$TARGET_NAME_DEFAULT"
-TARGET_IP="$TARGET_IP_DEFAULT"
-TS_PING_TARGET="$TS_PING_TARGET_DEFAULT"
-TS_PING_COUNT="$TS_PING_COUNT_DEFAULT"
-TS_SKIP_NETCHECK="$TS_SKIP_NETCHECK_DEFAULT"
+# Make scripts executable
+chmod +x "$INSTALL_DIR/tunnel_monitor.sh"
+
+# Create LaunchDaemon plist
+log "Creating LaunchDaemon..."
+sudo tee "/Library/LaunchDaemons/$SERVICE_NAME.plist" > /dev/null <<EOF
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+    <key>Label</key>
+    <string>$SERVICE_NAME</string>
+    <key>ProgramArguments</key>
+    <array>
+        <string>/bin/bash</string>
+        <string>$INSTALL_DIR/tunnel_monitor.sh</string>
+    </array>
+    <key>StartInterval</key>
+    <integer>180</integer>
+    <key>RunAtLoad</key>
+    <true/>
+    <key>KeepAlive</key>
+    <false/>
+    <key>StandardOutPath</key>
+    <string>$INSTALL_DIR/tunnel_monitor.log</string>
+    <key>StandardErrorPath</key>
+    <string>$INSTALL_DIR/tunnel_monitor.log</string>
+    <key>WorkingDirectory</key>
+    <string>$INSTALL_DIR</string>
+    <key>EnvironmentVariables</key>
+    <dict>
+        <key>PATH</key>
+        <string>/usr/local/bin:/usr/bin:/bin:/opt/homebrew/bin</string>
+    </dict>
+</dict>
+</plist>
 EOF
-  sudo chmod 600 "$SM_ENV"
+
+# Load and start the service
+log "Loading and starting the service..."
+sudo launchctl unload "/Library/LaunchDaemons/$SERVICE_NAME.plist" 2>/dev/null || true
+sudo launchctl load "/Library/LaunchDaemons/$SERVICE_NAME.plist"
+
+# Test the configuration
+log "Testing configuration..."
+if "$INSTALL_DIR/tunnel_monitor.sh"; then
+    log "Initial test run completed successfully!"
+else
+    warn "Initial test run failed. Check the logs at $INSTALL_DIR/tunnel_monitor.log"
 fi
 
-# --- install scripts to /usr/local/sbin ---
-echo "Symlinking scripts to /usr/local/sbin ..."
-sudo mkdir -p /usr/local/sbin
-sudo ln -sf "$REPO_DIR/$REST_UPDATE_SCRIPT_REL" /usr/local/sbin/ha_update_rest.sh
-sudo ln -sf "$REPO_DIR/$UPDATE_SCRIPT_REL"      /usr/local/sbin/ha_brew_update_db.sh
-sudo ln -sf "$REPO_DIR/$TUN_MONITOR_REL"        /usr/local/sbin/ha_tunnel_monitor.sh
-sudo chmod 755 /usr/local/sbin/ha_update_rest.sh /usr/local/sbin/ha_brew_update_db.sh /usr/local/sbin/ha_tunnel_monitor.sh
+# Create uninstall script
+cat > "$INSTALL_DIR/uninstall.sh" <<EOF
+#!/bin/bash
+echo "Uninstalling Tunnel Monitor..."
+sudo launchctl unload "/Library/LaunchDaemons/$SERVICE_NAME.plist" 2>/dev/null || true
+sudo rm -f "/Library/LaunchDaemons/$SERVICE_NAME.plist"
+sudo rm -rf "$INSTALL_DIR"
+echo "Tunnel Monitor uninstalled successfully!"
+EOF
+chmod +x "$INSTALL_DIR/uninstall.sh"
 
-# --- install LaunchDaemons ---
-echo "Symlinking LaunchDaemons ..."
-sudo ln -sf "$REPO_DIR/$REST_UPDATE_LAUNCHD_REL" /Library/LaunchDaemons/com.local.ha-update-rest.plist
-sudo ln -sf "$REPO_DIR/$UPDATE_LAUNCHD_REL"      /Library/LaunchDaemons/com.local.ha-brew-update-db.plist
-sudo ln -sf "$REPO_DIR/$TUN_LAUNCHD_REL"         /Library/LaunchDaemons/com.local.ha-tunnel-monitor.plist
-sudo chown root:wheel /Library/LaunchDaemons/com.local.ha-update-rest.plist \
-                      /Library/LaunchDaemons/com.local.ha-brew-update-db.plist \
-                      /Library/LaunchDaemons/com.local.ha-tunnel-monitor.plist
-sudo chmod 644 /Library/LaunchDaemons/com.local.ha-update-rest.plist \
-               /Library/LaunchDaemons/com.local.ha-brew-update-db.plist \
-               /Library/LaunchDaemons/com.local.ha-tunnel-monitor.plist
-
-# --- load LaunchDaemons ---
-echo "Loading LaunchDaemons ..."
-for job in com.local.ha-update-rest com.local.ha-brew-update-db com.local.ha-tunnel-monitor; do
-  sudo launchctl unload "/Library/LaunchDaemons/${job}.plist" >/dev/null 2>&1 || true
-  sudo launchctl load -w "/Library/LaunchDaemons/${job}.plist"
-done
-
-# --- trigger first runs ---
-echo "Triggering first runs ..."
-/usr/local/sbin/ha_brew_update_db.sh   || true
-/usr/local/sbin/ha_update_rest.sh      || true
-/usr/local/sbin/ha_tunnel_monitor.sh   || true
-
-echo "Done. Entities should appear in Home Assistant shortly:
-  - update.${HOST_TAG//-/_}_tailscale
-  - update.${HOST_TAG//-/_}_strongswan
-  - binary_sensor.${HOST_TAG//-/_}_site_magic_${TARGET_NAME_DEFAULT//-/_}_availability
-  - sensor.${HOST_TAG//-/_}_site_magic_${TARGET_NAME_DEFAULT//-/_}_latency_ms
-  - binary_sensor.${HOST_TAG//-/_}_tailscale_status
-  - sensor.${HOST_TAG//-/_}_tailscale_latency_ms
-  - binary_sensor.${HOST_TAG//-/_}_strongswan_service
-  - sensor.${HOST_TAG//-/_}_strongswan_clients
-
-Edit /etc/sitemagic_env to change targets/knobs, then:
-  sudo launchctl kickstart -k system/com.local.ha-tunnel-monitor
-"
+log "Installation completed successfully!"
+log ""
+log "Service will run every 3 minutes and report to Home Assistant."
+log "Logs are available at: $INSTALL_DIR/tunnel_monitor.log"
+log "To uninstall, run: $INSTALL_DIR/uninstall.sh"
+log ""
+log "You may want to configure your Home Assistant dashboard with the entities:"
+echo "  - binary_sensor.${HOST_TAG}_site_magic_tokyo_udm_availability"
+echo "  - binary_sensor.${HOST_TAG}_tailscale_connectivity"
+echo "  - binary_sensor.${HOST_TAG}_strongswan_connectivity"
+echo "  - binary_sensor.${HOST_TAG}_tailscale_exit_node"
+echo "  - sensor.${HOST_TAG}_site_magic_tokyo_udm_latency_ms"
+echo "  - sensor.${HOST_TAG}_strongswan_connected_clients"
+echo "  - sensor.${HOST_TAG}_cpu_usage"
+echo "  - sensor.${HOST_TAG}_network_rx_mb"
+echo "  - sensor.${HOST_TAG}_network_tx_mb"
+echo "  - update.${HOST_TAG}_tailscale"
+echo "  - update.${HOST_TAG}_strongswan"
