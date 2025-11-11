@@ -55,21 +55,34 @@ check_site_magic() {
     
     # Try to reach the Tokyo UDM (adjust IP as needed)
     local tokyo_udm_ip="${TOKYO_UDM_IP:-192.168.1.1}"
-    local start_time=$(date +%s%3N)
     
-    if ping -c 1 -W 3000 "$tokyo_udm_ip" >/dev/null 2>&1; then
-        local end_time=$(date +%s%3N)
-        local latency=$((end_time - start_time))
+    # Perform multiple pings to get average latency
+    local ping_output=$(ping -c 3 -W 3000 "$tokyo_udm_ip" 2>/dev/null)
+    local ping_success=$?
+    
+    if [[ $ping_success -eq 0 ]]; then
+        # Extract average latency from ping output
+        local avg_latency=$(echo "$ping_output" | grep "round-trip" | awk -F'/' '{print $5}' | cut -d'.' -f1)
+        
+        # If we can't parse the average, try to get it from individual pings
+        if [[ -z "$avg_latency" || "$avg_latency" == "" ]]; then
+            local latencies=$(echo "$ping_output" | grep "time=" | sed 's/.*time=\([0-9.]*\).*/\1/')
+            if [[ -n "$latencies" ]]; then
+                avg_latency=$(echo "$latencies" | awk '{sum+=$1; n++} END {if(n>0) printf "%.0f", sum/n; else print "0"}')
+            else
+                avg_latency=0
+            fi
+        fi
         
         send_to_ha "binary_sensor.${HOST_TAG}_site_magic_tokyo_udm_availability" "on" \
-            "{\"friendly_name\": \"Site Magic Tokyo UDM\", \"device_class\": \"connectivity\"}"
-        send_to_ha "sensor.${HOST_TAG}_site_magic_tokyo_udm_latency_ms" "$latency" \
+            "{\"friendly_name\": \"Site Magic Tokyo UDM\", \"device_class\": \"connectivity\", \"latency_ms\": $avg_latency}"
+        send_to_ha "sensor.${HOST_TAG}_site_magic_tokyo_udm_latency_ms" "$avg_latency" \
             "{\"friendly_name\": \"Site Magic Latency\", \"unit_of_measurement\": \"ms\"}"
         
-        log "Site Magic: UP (${latency}ms)"
+        log "Site Magic: UP (${avg_latency}ms avg)"
     else
         send_to_ha "binary_sensor.${HOST_TAG}_site_magic_tokyo_udm_availability" "off" \
-            "{\"friendly_name\": \"Site Magic Tokyo UDM\", \"device_class\": \"connectivity\"}"
+            "{\"friendly_name\": \"Site Magic Tokyo UDM\", \"device_class\": \"connectivity\", \"latency_ms\": null}"
         send_to_ha "sensor.${HOST_TAG}_site_magic_tokyo_udm_latency_ms" "unavailable" \
             "{\"friendly_name\": \"Site Magic Latency\", \"unit_of_measurement\": \"ms\"}"
         
@@ -88,27 +101,38 @@ check_tailscale() {
         
         if [[ -n "$tailscale_status" ]]; then
             local backend_state=$(echo "$tailscale_status" | jq -r '.BackendState // "Unknown"')
+            local derp_server=$(echo "$tailscale_status" | jq -r '.CurrentTailnet.MagicDNSSuffix // "Unknown"')
+            local peer_count=$(echo "$tailscale_status" | jq '.Peer | length' 2>/dev/null || echo 0)
             
+            # Get DERP region info
+            local derp_region=$(echo "$tailscale_status" | jq -r '.Self.Relay // "Unknown"')
+            
+            # Determine state
+            local state="stopped"
+            local connectivity_state="off"
             if [[ "$backend_state" == "Running" ]]; then
-                send_to_ha "binary_sensor.${HOST_TAG}_tailscale_connectivity" "on" \
-                    "{\"friendly_name\": \"Tailscale Connectivity\", \"device_class\": \"connectivity\"}"
-                log "Tailscale: UP"
-            else
-                send_to_ha "binary_sensor.${HOST_TAG}_tailscale_connectivity" "off" \
-                    "{\"friendly_name\": \"Tailscale Connectivity\", \"device_class\": \"connectivity\"}"
-                log "Tailscale: DOWN (State: $backend_state)"
+                state="running"
+                connectivity_state="on"
+            elif [[ "$backend_state" == "NeedsLogin" ]]; then
+                state="needslogin"
+                connectivity_state="off"
             fi
+            
+            send_to_ha "binary_sensor.${HOST_TAG}_tailscale_connectivity" "$connectivity_state" \
+                "{\"friendly_name\": \"Tailscale Connectivity\", \"device_class\": \"connectivity\", \"state\": \"$state\", \"derp_server\": \"$derp_region\", \"connected_peers\": $peer_count}"
+            
+            log "Tailscale: $state (DERP: $derp_region, Peers: $peer_count)"
             
             # Check for updates
             check_tailscale_updates
         else
             send_to_ha "binary_sensor.${HOST_TAG}_tailscale_connectivity" "off" \
-                "{\"friendly_name\": \"Tailscale Connectivity\", \"device_class\": \"connectivity\"}"
+                "{\"friendly_name\": \"Tailscale Connectivity\", \"device_class\": \"connectivity\", \"state\": \"stopped\", \"derp_server\": \"Unknown\", \"connected_peers\": 0}"
             log "Tailscale: Cannot get status"
         fi
     else
         send_to_ha "binary_sensor.${HOST_TAG}_tailscale_connectivity" "off" \
-            "{\"friendly_name\": \"Tailscale Connectivity\", \"device_class\": \"connectivity\"}"
+            "{\"friendly_name\": \"Tailscale Connectivity\", \"device_class\": \"connectivity\", \"state\": \"stopped\", \"derp_server\": \"Unknown\", \"connected_peers\": 0}"
         log "Tailscale: Process not running"
     fi
 }
@@ -148,14 +172,17 @@ check_strongswan() {
     
     # Check if StrongSwan is running
     if pgrep -f charon >/dev/null 2>&1; then
-        send_to_ha "binary_sensor.${HOST_TAG}_strongswan_connectivity" "on" \
-            "{\"friendly_name\": \"StrongSwan Connectivity\", \"device_class\": \"connectivity\"}"
-        
-        # Count connected clients
+        # Count connected clients using both swanctl and ipsec status
         local connected_clients=0
+        
         if command -v swanctl >/dev/null 2>&1; then
             connected_clients=$(swanctl --list-sas 2>/dev/null | grep -c "ESTABLISHED" || echo 0)
+        elif command -v ipsec >/dev/null 2>&1; then
+            connected_clients=$(ipsec status 2>/dev/null | grep -c "ESTABLISHED" || echo 0)
         fi
+        
+        send_to_ha "binary_sensor.${HOST_TAG}_strongswan_connectivity" "on" \
+            "{\"friendly_name\": \"StrongSwan Connectivity\", \"device_class\": \"connectivity\", \"connected_clients\": $connected_clients}"
         
         send_to_ha "sensor.${HOST_TAG}_strongswan_connected_clients" "$connected_clients" \
             "{\"friendly_name\": \"StrongSwan Connected Clients\", \"unit_of_measurement\": \"clients\"}"
@@ -166,7 +193,7 @@ check_strongswan() {
         check_strongswan_updates
     else
         send_to_ha "binary_sensor.${HOST_TAG}_strongswan_connectivity" "off" \
-            "{\"friendly_name\": \"StrongSwan Connectivity\", \"device_class\": \"connectivity\"}"
+            "{\"friendly_name\": \"StrongSwan Connectivity\", \"device_class\": \"connectivity\", \"connected_clients\": 0}"
         send_to_ha "sensor.${HOST_TAG}_strongswan_connected_clients" "unavailable" \
             "{\"friendly_name\": \"StrongSwan Connected Clients\", \"unit_of_measurement\": \"clients\"}"
         
