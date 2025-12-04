@@ -15,7 +15,6 @@ This monitoring system runs on a Mac Mini i7 with 10GB NIC (`seattle-tunnel`) an
 - **Site Magic Connectivity**: Binary sensor + latency monitoring to Tokyo UDM
 - **Tailscale Status**: Connectivity status + exit node status + update availability
 - **StrongSwan Status**: Service status + connected client count + update availability  
-- **System Metrics**: CPU usage, network throughput on 10GB interface
 - **Automatic Updates**: Check for Tailscale and StrongSwan updates via Home Assistant update entities
 
 ### Home Assistant Entities Created
@@ -27,6 +26,19 @@ This monitoring system runs on a Mac Mini i7 with 10GB NIC (`seattle-tunnel`) an
 - `sensor.{HOST_TAG}_strongswan_connected_clients`
 - `update.{HOST_TAG}_tailscale`
 - `update.{HOST_TAG}_strongswan`
+
+### Sensor Attributes
+
+**Tailscale binary sensor includes:**
+- `state`: "running", "stopped", or "needslogin"
+- `derp_server`: DERP relay region being used
+- `connected_peers`: Number of connected Tailscale peers
+
+**StrongSwan binary sensor includes:**
+- `connected_clients`: Number of established IPsec tunnels
+
+**Site Magic binary sensor includes:**
+- `latency_ms`: Average round-trip time in milliseconds
 
 ## Prerequisites
 
@@ -42,15 +54,15 @@ Before installation, ensure you have:
 
 ## Install
 
-Installation is achieved via a single curl command with environment variables:
+Installation is achieved by setting environment variables and running the install script:
 
 ```bash
-bash -c "$(curl -fsSL https://raw.githubusercontent.com/zacs/tunnel-monitor/main/install_tunnel_monitor.sh)" -- \
-  REPO_URL=https://github.com/zacs/tunnel-monitor.git \
-  HA_URL=https://homeassistant.example.com:8123 \
-  HA_TOKEN=YOUR_LONG_LIVED_TOKEN \
-  HOST_TAG=seattle_tunnel \
-  TOKYO_UDM_IP=192.168.1.1
+REPO_URL=https://github.com/zacs/tunnel-monitor.git \
+HA_URL=https://homeassistant.example.com:8123 \
+HA_TOKEN=YOUR_LONG_LIVED_TOKEN \
+HOST_TAG=seattle_tunnel \
+TOKYO_UDM_IP=192.168.1.1 \
+bash -c "$(curl -fsSL https://raw.githubusercontent.com/zacs/tunnel-monitor/main/install_tunnel_monitor.sh)"
 ```
 
 ### Parameters
@@ -59,6 +71,16 @@ bash -c "$(curl -fsSL https://raw.githubusercontent.com/zacs/tunnel-monitor/main
 - `HA_TOKEN`: Long-lived access token from Home Assistant
 - `HOST_TAG`: Identifier for this tunnel server (used in entity names)
 - `TOKYO_UDM_IP`: IP address of your Tokyo UDM for Site Magic monitoring
+
+### Example Installation
+```bash
+REPO_URL=https://github.com/zacs/tunnel-monitor.git \
+HA_URL=http://192.168.2.19:8123 \
+HA_TOKEN="eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9..." \
+HOST_TAG=seattle_tunnel \
+TOKYO_UDM_IP=192.168.82.1 \
+bash -c "$(curl -fsSL https://raw.githubusercontent.com/zacs/tunnel-monitor/main/install_tunnel_monitor.sh)"
+```
 
 The installer will:
 1. Install dependencies (jq via Homebrew if needed)
@@ -194,17 +216,3 @@ swanctl --list-sas
 # Test Site Magic (replace with your Tokyo UDM IP)
 ping -c 3 192.168.1.1
 ```
-
-## Initial Prompt
-
-i would like this project to monitor the capabilities of a modern VPN server at my home. this server acts as a Tailscale node (and exit node) as well as a Strongswan server. the server is a Mac Mini i7 with a 10GB NIC, named seattle-tunnel. 
-
-my use case is that seattle-tunnel is in Seattle, and i currently live in Tokyo for a few years. i would like to monitor and ensure that my connectivity to seattle is working. when it isn't working, i want to know. i intend to use Home Assistant as the source of state. 
-
-i would like it to monitor 3 things: the status of the Unifi Site Magic connection between Seattle and Tokyo; the status of Tailscale connectivity; and the status of StrongSwan. 
-
-i would prefer that the monitoring be done as a system level monitor (a plist file that auto-starts). i would like binary_sensors to indicate each of the three services is up. for the Tailscale and StrongSwan ones, i would like to have an update type entity in Home Assistant that lets me know if an update is available (so I can then SSH into seattle-tunnel and update, for example, the TailScale app). for StrongSwan i guess a sensor to monitor the number of connected users would be good. i am also open to any other sensors you think would be useful in this situation. 
-
-i would like these monitoring scripts to run every few minutes, and to update their sensors to Home Assistant via its API. 
-
-finally, i would like all of this to be installable via a simple curl/wget one-liner, to get it all onto the MacOS seattle-tunnel machine.

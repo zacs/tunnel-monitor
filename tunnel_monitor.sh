@@ -1,5 +1,22 @@
 #!/bin/bash
 # tunnel_monitor.sh - Monitor VPN services and report to Home Assistant
+
+# Prevent multiple instances
+LOCK_FILE="/tmp/tunnel_monitor.lock"
+if [[ -f "$LOCK_FILE" ]]; then
+    if ps -p $(cat "$LOCK_FILE") > /dev/null 2>&1; then
+        # Another instance is running
+        exit 0
+    else
+        # Stale lock file, remove it
+        rm -f "$LOCK_FILE"
+    fi
+fi
+echo $$ > "$LOCK_FILE"
+
+# Cleanup on exit
+trap 'rm -f "$LOCK_FILE"' EXIT
+
 # Configuration
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 CONFIG_FILE="$SCRIPT_DIR/config.env"
@@ -53,7 +70,7 @@ send_to_ha() {
 check_site_magic() {
     log "Checking Unifi Site Magic connectivity..."
     
-    # Try to reach the Tokyo UDM (adjust IP as needed)
+    # Try to reach the Tokyo UDM
     local tokyo_udm_ip="${TOKYO_UDM_IP:-192.168.1.1}"
     
     # Perform multiple pings to get average latency
@@ -61,10 +78,11 @@ check_site_magic() {
     local ping_success=$?
     
     if [[ $ping_success -eq 0 ]]; then
-        # Extract average latency from ping output
-        local avg_latency=$(echo "$ping_output" | grep "round-trip" | awk -F'/' '{print $5}' | cut -d'.' -f1)
+        # Extract average latency from macOS ping output
+        # From: "round-trip min/avg/max/stddev = 3.199/5.975/7.394/1.963 ms"
+        local avg_latency=$(echo "$ping_output" | grep "round-trip" | awk -F'=' '{print $2}' | awk -F'/' '{print $2}' | cut -d'.' -f1)
         
-        # If we can't parse the average, try to get it from individual pings
+        # If we can't parse the average, calculate from individual pings
         if [[ -z "$avg_latency" || "$avg_latency" == "" ]]; then
             local latencies=$(echo "$ping_output" | grep "time=" | sed 's/.*time=\([0-9.]*\).*/\1/')
             if [[ -n "$latencies" ]]; then
@@ -75,16 +93,16 @@ check_site_magic() {
         fi
         
         send_to_ha "binary_sensor.${HOST_TAG}_site_magic_tokyo_udm_availability" "on" \
-            "{\"friendly_name\": \"Site Magic Tokyo UDM\", \"device_class\": \"connectivity\", \"latency_ms\": $avg_latency}"
+            "{\"friendly_name\": \"${HOST_TAG} Site Magic\", \"device_class\": \"connectivity\", \"latency_ms\": $avg_latency}"
         send_to_ha "sensor.${HOST_TAG}_site_magic_tokyo_udm_latency_ms" "$avg_latency" \
-            "{\"friendly_name\": \"Site Magic Latency\", \"unit_of_measurement\": \"ms\"}"
+            "{\"friendly_name\": \"${HOST_TAG} Site Magic Latency\", \"unit_of_measurement\": \"ms\"}"
         
         log "Site Magic: UP (${avg_latency}ms avg)"
     else
         send_to_ha "binary_sensor.${HOST_TAG}_site_magic_tokyo_udm_availability" "off" \
-            "{\"friendly_name\": \"Site Magic Tokyo UDM\", \"device_class\": \"connectivity\", \"latency_ms\": null}"
+            "{\"friendly_name\": \"${HOST_TAG} Site Magic\", \"device_class\": \"connectivity\", \"latency_ms\": null}"
         send_to_ha "sensor.${HOST_TAG}_site_magic_tokyo_udm_latency_ms" "unavailable" \
-            "{\"friendly_name\": \"Site Magic Latency\", \"unit_of_measurement\": \"ms\"}"
+            "{\"friendly_name\": \"${HOST_TAG} Site Magic Latency\", \"unit_of_measurement\": \"ms\"}"
         
         log "Site Magic: DOWN"
     fi
@@ -94,75 +112,97 @@ check_site_magic() {
 check_tailscale() {
     log "Checking Tailscale connectivity..."
     
-    # Check if Tailscale is running
-    if pgrep -f tailscaled >/dev/null 2>&1; then
-        # Check Tailscale status
-        local tailscale_status=$(tailscale status --json 2>/dev/null)
+    # Use tailscale command from PATH (Homebrew installation)
+    if command -v tailscale >/dev/null 2>&1; then
+        # Get Tailscale status
+        local tailscale_output=$(tailscale status 2>/dev/null)
+        local tailscale_exit_code=$?
         
-        if [[ -n "$tailscale_status" ]]; then
-            local backend_state=$(echo "$tailscale_status" | jq -r '.BackendState // "Unknown"')
-            local derp_server=$(echo "$tailscale_status" | jq -r '.CurrentTailnet.MagicDNSSuffix // "Unknown"')
-            local peer_count=$(echo "$tailscale_status" | jq '.Peer | length' 2>/dev/null || echo 0)
+        if [[ $tailscale_exit_code -eq 0 && -n "$tailscale_output" ]]; then
+            # Get the current hostname without .local suffix
+            local current_hostname=$(hostname -s | sed 's/\.local$//')
             
-            # Get DERP region info
-            local derp_region=$(echo "$tailscale_status" | jq -r '.Self.Relay // "Unknown"')
+            # Count connected peers (exclude offline entries, exclude self)
+            local peer_count=$(echo "$tailscale_output" | grep -v "offline" | grep -v "$current_hostname" | wc -l | tr -d ' ')
             
-            # Determine state
-            local state="stopped"
-            local connectivity_state="off"
-            if [[ "$backend_state" == "Running" ]]; then
-                state="running"
-                connectivity_state="on"
-            elif [[ "$backend_state" == "NeedsLogin" ]]; then
-                state="needslogin"
-                connectivity_state="off"
+            # Check if THIS node offers exit node by looking for our hostname in the status
+            local offers_exit_node="false"
+            if echo "$tailscale_output" | grep "$current_hostname" | grep -q "offers exit node"; then
+                offers_exit_node="true"
             fi
             
-            send_to_ha "binary_sensor.${HOST_TAG}_tailscale_connectivity" "$connectivity_state" \
-                "{\"friendly_name\": \"Tailscale Connectivity\", \"device_class\": \"connectivity\", \"state\": \"$state\", \"derp_server\": \"$derp_region\", \"connected_peers\": $peer_count}"
+            # Get DERP info from JSON status
+            local derp_region="Unknown"
+            local tailscale_json=$(tailscale status --json 2>/dev/null)
+            if [[ -n "$tailscale_json" ]]; then
+                derp_region=$(echo "$tailscale_json" | jq -r '.Self.Relay // "Unknown"' 2>/dev/null || echo "Unknown")
+            fi
             
-            log "Tailscale: $state (DERP: $derp_region, Peers: $peer_count)"
+            send_to_ha "binary_sensor.${HOST_TAG}_tailscale_connectivity" "on" \
+                "{\"friendly_name\": \"${HOST_TAG} Tailscale Connectivity\", \"device_class\": \"connectivity\", \"state\": \"running\", \"derp_server\": \"$derp_region\", \"connected_peers\": $peer_count}"
             
-            # Check for updates
+            log "Tailscale: running (DERP: $derp_region, Peers: $peer_count)"
+            
+            # Check exit node status for THIS node only
+            if [[ "$offers_exit_node" == "true" ]]; then
+                send_to_ha "binary_sensor.${HOST_TAG}_tailscale_exit_node" "on" \
+                    "{\"friendly_name\": \"${HOST_TAG} Tailscale Exit Node\", \"device_class\": \"connectivity\"}"
+                log "Tailscale Exit Node: Active ($current_hostname offers exit node)"
+            else
+                send_to_ha "binary_sensor.${HOST_TAG}_tailscale_exit_node" "off" \
+                    "{\"friendly_name\": \"${HOST_TAG} Tailscale Exit Node\", \"device_class\": \"connectivity\"}"
+                log "Tailscale Exit Node: Inactive ($current_hostname does not offer exit node)"
+            fi
+            
+            # Check for updates via Homebrew
             check_tailscale_updates
+            
         else
+            # Tailscale CLI failed or returned empty
             send_to_ha "binary_sensor.${HOST_TAG}_tailscale_connectivity" "off" \
-                "{\"friendly_name\": \"Tailscale Connectivity\", \"device_class\": \"connectivity\", \"state\": \"stopped\", \"derp_server\": \"Unknown\", \"connected_peers\": 0}"
-            log "Tailscale: Cannot get status"
+                "{\"friendly_name\": \"${HOST_TAG} Tailscale Connectivity\", \"device_class\": \"connectivity\", \"state\": \"stopped\", \"derp_server\": \"Unknown\", \"connected_peers\": 0}"
+            send_to_ha "binary_sensor.${HOST_TAG}_tailscale_exit_node" "off" \
+                "{\"friendly_name\": \"${HOST_TAG} Tailscale Exit Node\", \"device_class\": \"connectivity\"}"
+            log "Tailscale: CLI error or not running (exit code: $tailscale_exit_code)"
         fi
     else
+        # Tailscale CLI not found
         send_to_ha "binary_sensor.${HOST_TAG}_tailscale_connectivity" "off" \
-            "{\"friendly_name\": \"Tailscale Connectivity\", \"device_class\": \"connectivity\", \"state\": \"stopped\", \"derp_server\": \"Unknown\", \"connected_peers\": 0}"
-        log "Tailscale: Process not running"
+            "{\"friendly_name\": \"${HOST_TAG} Tailscale Connectivity\", \"device_class\": \"connectivity\", \"state\": \"stopped\", \"derp_server\": \"Unknown\", \"connected_peers\": 0}"
+        send_to_ha "binary_sensor.${HOST_TAG}_tailscale_exit_node" "off" \
+            "{\"friendly_name\": \"${HOST_TAG} Tailscale Exit Node\", \"device_class\": \"connectivity\"}"
+        log "Tailscale: CLI not found in PATH"
     fi
 }
 
 check_tailscale_updates() {
-    # Update brew catalog first to get latest version info
-    log "Updating Homebrew catalog..."
-    brew update >/dev/null 2>&1
-    
-    # Check if Tailscale is installed via Homebrew
-    if command -v brew >/dev/null 2>&1 && brew list tailscale >/dev/null 2>&1; then
-        local current_version=$(brew list --versions tailscale 2>/dev/null | awk '{print $2}' || echo "unknown")
-        local latest_info=$(brew outdated tailscale 2>/dev/null)
+    # Get update info from tailscale status output
+    if command -v tailscale >/dev/null 2>&1; then
+        local tailscale_status=$(tailscale status 2>/dev/null)
         
-        if [[ -n "$latest_info" ]]; then
-            local latest_version=$(echo "$latest_info" | awk '{print $3}')
+        # Look for update information in the health check section
+        local update_line=$(echo "$tailscale_status" | grep "An update from version")
+        
+        if [[ -n "$update_line" ]]; then
+            # Parse: "An update from version 1.90.2 to 1.90.9 is available"
+            local current_version=$(echo "$update_line" | sed 's/.*from version \([0-9.]*\) to.*/\1/')
+            local latest_version=$(echo "$update_line" | sed 's/.*to \([0-9.]*\) is available.*/\1/')
+            
             send_to_ha "update.${HOST_TAG}_tailscale" "on" \
-                "{\"friendly_name\": \"Tailscale Update\", \"installed_version\": \"$current_version\", \"latest_version\": \"$latest_version\"}"
+                "{\"friendly_name\": \"${HOST_TAG} Tailscale Update\", \"installed_version\": \"$current_version\", \"latest_version\": \"$latest_version\"}"
             log "Tailscale update available: $current_version -> $latest_version"
         else
+            # No update available, get current version from tailscale version command
+            local current_version=$(tailscale version 2>/dev/null | head -1 | awk '{print $1}' || echo "unknown")
+            
             send_to_ha "update.${HOST_TAG}_tailscale" "off" \
-                "{\"friendly_name\": \"Tailscale Update\", \"installed_version\": \"$current_version\"}"
+                "{\"friendly_name\": \"${HOST_TAG} Tailscale Update\", \"installed_version\": \"$current_version\"}"
             log "Tailscale is up to date: $current_version"
         fi
     else
-        # Fallback for non-Homebrew installations
-        local current_version=$(tailscale version | head -n1 | awk '{print $1}' 2>/dev/null || echo "unknown")
         send_to_ha "update.${HOST_TAG}_tailscale" "off" \
-            "{\"friendly_name\": \"Tailscale Update\", \"installed_version\": \"$current_version\", \"note\": \"Not installed via Homebrew\"}"
-        log "Tailscale not installed via Homebrew, cannot check for updates automatically"
+            "{\"friendly_name\": \"${HOST_TAG} Tailscale Update\", \"installed_version\": \"unknown\", \"note\": \"Tailscale CLI not found\"}"
+        log "Tailscale CLI not found, cannot check for updates"
     fi
 }
 
@@ -182,10 +222,10 @@ check_strongswan() {
         fi
         
         send_to_ha "binary_sensor.${HOST_TAG}_strongswan_connectivity" "on" \
-            "{\"friendly_name\": \"StrongSwan Connectivity\", \"device_class\": \"connectivity\", \"connected_clients\": $connected_clients}"
+            "{\"friendly_name\": \"${HOST_TAG} StrongSwan Connectivity\", \"device_class\": \"connectivity\", \"connected_clients\": $connected_clients}"
         
         send_to_ha "sensor.${HOST_TAG}_strongswan_connected_clients" "$connected_clients" \
-            "{\"friendly_name\": \"StrongSwan Connected Clients\", \"unit_of_measurement\": \"clients\"}"
+            "{\"friendly_name\": \"${HOST_TAG} StrongSwan Connected Clients\", \"unit_of_measurement\": \"clients\"}"
         
         log "StrongSwan: UP ($connected_clients clients connected)"
         
@@ -193,9 +233,9 @@ check_strongswan() {
         check_strongswan_updates
     else
         send_to_ha "binary_sensor.${HOST_TAG}_strongswan_connectivity" "off" \
-            "{\"friendly_name\": \"StrongSwan Connectivity\", \"device_class\": \"connectivity\", \"connected_clients\": 0}"
+            "{\"friendly_name\": \"${HOST_TAG} StrongSwan Connectivity\", \"device_class\": \"connectivity\", \"connected_clients\": 0}"
         send_to_ha "sensor.${HOST_TAG}_strongswan_connected_clients" "unavailable" \
-            "{\"friendly_name\": \"StrongSwan Connected Clients\", \"unit_of_measurement\": \"clients\"}"
+            "{\"friendly_name\": \"${HOST_TAG} StrongSwan Connected Clients\", \"unit_of_measurement\": \"clients\"}"
         
         log "StrongSwan: DOWN (Process not running)"
     fi
@@ -210,27 +250,11 @@ check_strongswan_updates() {
         if [[ -n "$latest_info" ]]; then
             local latest_version=$(echo "$latest_info" | awk '{print $3}')
             send_to_ha "update.${HOST_TAG}_strongswan" "on" \
-                "{\"friendly_name\": \"StrongSwan Update\", \"installed_version\": \"$current_version\", \"latest_version\": \"$latest_version\"}"
+                "{\"friendly_name\": \"${HOST_TAG} StrongSwan Update\", \"installed_version\": \"$current_version\", \"latest_version\": \"$latest_version\"}"
         else
             send_to_ha "update.${HOST_TAG}_strongswan" "off" \
-                "{\"friendly_name\": \"StrongSwan Update\", \"installed_version\": \"$current_version\"}"
+                "{\"friendly_name\": \"${HOST_TAG} StrongSwan Update\", \"installed_version\": \"$current_version\"}"
         fi
-    fi
-}
-
-# Additional useful monitoring
-check_network_performance() {
-    log "Checking Tailscale exit node status..."
-    
-    # Check internet connectivity through Tailscale exit node
-    if tailscale status --json 2>/dev/null | jq -r '.ExitNodeStatus.Online' 2>/dev/null | grep -q true; then
-        send_to_ha "binary_sensor.${HOST_TAG}_tailscale_exit_node" "on" \
-            "{\"friendly_name\": \"Tailscale Exit Node\", \"device_class\": \"connectivity\"}"
-        log "Tailscale Exit Node: Active"
-    else
-        send_to_ha "binary_sensor.${HOST_TAG}_tailscale_exit_node" "off" \
-            "{\"friendly_name\": \"Tailscale Exit Node\", \"device_class\": \"connectivity\"}"
-        log "Tailscale Exit Node: Inactive"
     fi
 }
 
@@ -241,7 +265,6 @@ main() {
     check_site_magic
     check_tailscale
     check_strongswan
-    check_network_performance
     
     log "Tunnel monitor check completed"
 }
