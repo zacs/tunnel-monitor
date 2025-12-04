@@ -1,22 +1,6 @@
 #!/bin/bash
 # tunnel_monitor.sh - Monitor VPN services and report to Home Assistant
 
-# Prevent multiple instances
-LOCK_FILE="/tmp/tunnel_monitor.lock"
-if [[ -f "$LOCK_FILE" ]]; then
-    if ps -p $(cat "$LOCK_FILE") > /dev/null 2>&1; then
-        # Another instance is running
-        exit 0
-    else
-        # Stale lock file, remove it
-        rm -f "$LOCK_FILE"
-    fi
-fi
-echo $$ > "$LOCK_FILE"
-
-# Cleanup on exit
-trap 'rm -f "$LOCK_FILE"' EXIT
-
 # Configuration
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 CONFIG_FILE="$SCRIPT_DIR/config.env"
@@ -35,10 +19,11 @@ if [[ -z "$HA_URL" || -z "$HA_TOKEN" || -z "$HOST_TAG" ]]; then
     exit 1
 fi
 
-# Logging
+# Logging with PID for debugging - only write to log file to avoid duplication
 LOG_FILE="$SCRIPT_DIR/tunnel_monitor.log"
 log() {
-    echo "[$(date '+%Y-%m-%d %H:%M:%S')] $1" | tee -a "$LOG_FILE"
+    local msg="[$(date '+%Y-%m-%d %H:%M:%S')] [PID:$$] $1"
+    echo "$msg" >> "$LOG_FILE"
 }
 
 # Home Assistant API functions
@@ -73,8 +58,20 @@ check_site_magic() {
     # Try to reach the Tokyo UDM
     local tokyo_udm_ip="${TOKYO_UDM_IP:-192.168.1.1}"
     
+    # Use full path to ping since LaunchDaemon has limited PATH
+    local ping_cmd="/sbin/ping"
+    if [[ ! -x "$ping_cmd" ]]; then
+        # Try alternate locations
+        for alt_ping in "/bin/ping" "/usr/bin/ping" "/usr/sbin/ping"; do
+            if [[ -x "$alt_ping" ]]; then
+                ping_cmd="$alt_ping"
+                break
+            fi
+        done
+    fi
+    
     # Perform multiple pings to get average latency
-    local ping_output=$(ping -c 3 -W 3000 "$tokyo_udm_ip" 2>/dev/null)
+    local ping_output=$($ping_cmd -c 3 -W 3000 "$tokyo_udm_ip" 2>&1)
     local ping_success=$?
     
     if [[ $ping_success -eq 0 ]]; then
@@ -154,7 +151,7 @@ check_tailscale() {
                 log "Tailscale Exit Node: Inactive ($current_hostname does not offer exit node)"
             fi
             
-            # Check for updates via Homebrew
+            # Check for updates
             check_tailscale_updates
             
         else
