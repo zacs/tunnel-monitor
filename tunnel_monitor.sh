@@ -55,8 +55,8 @@ send_to_ha() {
 check_site_magic() {
     log "Checking Unifi Site Magic connectivity..."
     
-    # Try to reach the Tokyo UDM
-    local tokyo_udm_ip="${TOKYO_UDM_IP:-192.168.1.1}"
+    # Try to reach the remote UDM
+    local remote_udm_ip="${REMOTE_UDM_IP:-192.168.1.1}"
     
     # Use full path to ping since LaunchDaemon has limited PATH
     local ping_cmd="/sbin/ping"
@@ -71,10 +71,13 @@ check_site_magic() {
     fi
     
     # Perform multiple pings to get average latency
-    local ping_output=$($ping_cmd -c 3 -W 3000 "$tokyo_udm_ip" 2>&1)
+    local ping_output=$($ping_cmd -c 3 -W 3000 "$remote_udm_ip" 2>&1)
     local ping_success=$?
     
-    if [[ $ping_success -eq 0 ]]; then
+    # Check if we actually received packets (not just if ping command succeeded)
+    local packets_received=$(echo "$ping_output" | grep "packets received" | awk '{print $4}')
+    
+    if [[ $ping_success -eq 0 && -n "$packets_received" && "$packets_received" -gt 0 ]]; then
         # Extract average latency from macOS ping output
         # From: "round-trip min/avg/max/stddev = 3.199/5.975/7.394/1.963 ms"
         local avg_latency=$(echo "$ping_output" | grep "round-trip" | awk -F'=' '{print $2}' | awk -F'/' '{print $2}' | cut -d'.' -f1)
@@ -89,19 +92,30 @@ check_site_magic() {
             fi
         fi
         
-        send_to_ha "binary_sensor.${HOST_TAG}_site_magic_tokyo_udm_availability" "on" \
-            "{\"friendly_name\": \"${HOST_TAG} Site Magic\", \"device_class\": \"connectivity\", \"latency_ms\": $avg_latency}"
-        send_to_ha "sensor.${HOST_TAG}_site_magic_tokyo_udm_latency_ms" "$avg_latency" \
-            "{\"friendly_name\": \"${HOST_TAG} Site Magic Latency\", \"unit_of_measurement\": \"ms\"}"
-        
-        log "Site Magic: UP (${avg_latency}ms avg)"
+        # Double-check we have a valid latency value
+        if [[ -n "$avg_latency" && "$avg_latency" -gt 0 ]]; then
+            send_to_ha "binary_sensor.${HOST_TAG}_site_magic_remote_udm_availability" "on" \
+                "{\"friendly_name\": \"${HOST_TAG} Site Magic\", \"device_class\": \"connectivity\", \"latency_ms\": $avg_latency}"
+            send_to_ha "sensor.${HOST_TAG}_site_magic_remote_udm_latency_ms" "$avg_latency" \
+                "{\"friendly_name\": \"${HOST_TAG} Site Magic Latency\", \"unit_of_measurement\": \"ms\"}"
+            
+            log "Site Magic: UP (${avg_latency}ms avg, $packets_received packets received)"
+        else
+            # Latency is 0 or invalid, treat as down
+            send_to_ha "binary_sensor.${HOST_TAG}_site_magic_remote_udm_availability" "off" \
+                "{\"friendly_name\": \"${HOST_TAG} Site Magic\", \"device_class\": \"connectivity\", \"latency_ms\": null}"
+            send_to_ha "sensor.${HOST_TAG}_site_magic_remote_udm_latency_ms" "unavailable" \
+                "{\"friendly_name\": \"${HOST_TAG} Site Magic Latency\", \"unit_of_measurement\": \"ms\"}"
+            
+            log "Site Magic: DOWN (latency parsing failed or 0ms)"
+        fi
     else
-        send_to_ha "binary_sensor.${HOST_TAG}_site_magic_tokyo_udm_availability" "off" \
+        send_to_ha "binary_sensor.${HOST_TAG}_site_magic_remote_udm_availability" "off" \
             "{\"friendly_name\": \"${HOST_TAG} Site Magic\", \"device_class\": \"connectivity\", \"latency_ms\": null}"
-        send_to_ha "sensor.${HOST_TAG}_site_magic_tokyo_udm_latency_ms" "unavailable" \
+        send_to_ha "sensor.${HOST_TAG}_site_magic_remote_udm_latency_ms" "unavailable" \
             "{\"friendly_name\": \"${HOST_TAG} Site Magic Latency\", \"unit_of_measurement\": \"ms\"}"
         
-        log "Site Magic: DOWN"
+        log "Site Magic: DOWN (ping failed or 0 packets received - received: $packets_received)"
     fi
 }
 
